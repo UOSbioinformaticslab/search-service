@@ -156,7 +156,7 @@ func HealthCheck(c *gin.Context) {
 
 	// TODO: Ping search explanation extractor once it has a healthcheck endpoint of its own
 
-	// Ping BigQuery 
+	// Ping BigQuery
 	ctx := context.Background()
 	_, bqErr := BigQueryClient.Dataset(os.Getenv("BQ_DATASET_NAME")).Metadata(ctx)
 	if bqErr != nil {
@@ -164,7 +164,7 @@ func HealthCheck(c *gin.Context) {
 		if errors.As(bqErr, &e) {
 			results["bigquery_status"] = e.Code
 			results["bigquery_message"] = e.Message
-		} 
+		}
 	} else {
 		results["bigquery_status"] = 200
 	}
@@ -196,35 +196,6 @@ func HealthCheck(c *gin.Context) {
 
 	c.JSON(http.StatusOK, results)
 }
-
-func EnsureTableExists() error {
-
-	ctx := context.Background()
-    dataset := BigQueryClient.Dataset(os.Getenv("BQ_DATASET_NAME"))
-    table := dataset.Table(os.Getenv("BQ_TABLE_NAME"))
-
-	schema := bigquery.Schema{
-		{Name: "UUID", Required: true, Type: bigquery.StringFieldType},
-		{Name: "Timestamp", Required: false, Type: bigquery.DateTimeFieldType},
-		{Name: "EntityType", Required: true, Type: bigquery.StringFieldType},
-		{Name: "SearchTerm", Required: false, Type: bigquery.StringFieldType},
-		{Name: "FilterUsed", Repeated: false, Type: bigquery.JSONFieldType},
-		{Name: "PageResults", Required: false, Type: bigquery.JSONFieldType},
-		{Name: "EntitiesReturned", Required: true, Type: bigquery.IntegerFieldType},
-	}
-
-	if err := table.Create(ctx, &bigquery.TableMetadata{Schema: schema}); err != nil {
-		var e *googleapi.Error
-		if errors.As(err, &e)  && e.Code == 409 {
-			slog.Debug(fmt.Sprintf("%s", err.Error()))
-			return nil
-		}
-		slog.Info(fmt.Sprintf("Could not create table: %s", err.Error()))
-		return err
-	}
-	return nil
-}
-
 
 // SearchGeneric performs searches of the ElasticSearch indices for datasets,
 // tools and collections, using the query supplied in the gin.Context.
@@ -283,7 +254,7 @@ func DatasetSearch(c *gin.Context) {
 	}
 
 	results := datasetSearch(query)
-	BQUpload(query, results, "dataset")
+	//BQUpload(query, results, "dataset")
 	c.JSON(http.StatusOK, results)
 }
 
@@ -296,60 +267,27 @@ func datasetChannel(query Query, res chan SearchResponse) {
 // the provided query as the search term.  Results are returned in the format
 // returned by elastic (SearchResponse).
 func datasetSearch(query Query) SearchResponse {
-	var buf bytes.Buffer
-
-	elasticQuery := datasetElasticConfig(query)
-	if err := json.NewEncoder(&buf).Encode(elasticQuery); err != nil {
-		slog.Debug(fmt.Sprintf(
-			"Failed to encode elastic config %s with %s",
-			elasticQuery,
-			err.Error()),
-		)
-	}
-
-	response, err := ElasticClient.Search(
-		ElasticClient.Search.WithIndex("dataset"),
-		ElasticClient.Search.WithBody(&buf),
-	)
-
-	if err != nil {
-		slog.Debug(fmt.Sprintf(
-			"Failed to execute elastic query with %s",
-			err.Error()),
-		)
-	}
-	defer response.Body.Close()
-
-	body, err := io.ReadAll(response.Body)
-	if err != nil {
-		slog.Debug(fmt.Sprintf(
-			"Failed to read elastic response with %s",
-			err.Error()),
-		)
-	}
-
-	var elasticResp SearchResponse
-	json.Unmarshal(body, &elasticResp)
+	elasticResp, body := executeSearchWithRetry("dataset", func() gin.H {
+		return datasetElasticConfig(query)
+	})
 
 	if elasticResp.Hits.Hits == nil {
-		// When there are genuinely no matches elastic returns hits == [].
-		// When the hits == nil this implies something has actually gone wrong
-		// for example an aggregation that cannot be calculated.
-		// So we throw a warning in the case where hits == nil and more info
-		// if debug mode is on.
-		var elasticError SearchErrorResponse
-		json.Unmarshal(body, &elasticError)
-		// Try to extract the root cause message; if unable throw generic warning
-		rootCause := elasticError.Error["root_cause"][0]
-		if rootCause.Reason != "" {
-			slog.Warn(
-				fmt.Sprintf("Search query returned elastic error: %s",
-					rootCause.Reason,
-				))
+		if len(body) > 0 {
+			var elasticError SearchErrorResponse
+			json.Unmarshal(body, &elasticError)
+			rootCauses := elasticError.Error["root_cause"]
+			if len(rootCauses) > 0 && rootCauses[0].Reason != "" {
+				slog.Warn(
+					fmt.Sprintf("Search query returned elastic error: %s",
+						rootCauses[0].Reason,
+					))
+			} else {
+				slog.Warn("Hits from elastic are null, query may be malformed")
+			}
 		} else {
 			slog.Warn("Hits from elastic are null, query may be malformed")
 		}
-		slog.Debug(fmt.Sprintf("Null result elastic query: %s", elasticQuery))
+		slog.Debug(fmt.Sprintf("Null result elastic query: %s", datasetElasticConfig(query)))
 	}
 
 	stripExplanation(elasticResp, query, "dataset")
@@ -512,7 +450,7 @@ func datasetElasticConfig(query Query) gin.H {
 		},
 	}
 
-	agg1 := buildAggregations(query, mustFilters)
+	agg1 := buildAggregations(query, mustFilters, "dataset")
 
 	response := gin.H{
 		"size":  os.Getenv("SEARCH_NO_RECORDS"),
@@ -551,7 +489,7 @@ func ToolSearch(c *gin.Context) {
 		return
 	}
 	results := toolSearch(query)
-	BQUpload(query, results, "tool")
+	//BQUpload(query, results, "tool")
 	c.JSON(http.StatusOK, results)
 }
 
@@ -564,44 +502,27 @@ func toolChannel(query Query, res chan SearchResponse) {
 // the provided query as the search term.  Results are returned in the format
 // returned by elastic (SearchResponse).
 func toolSearch(query Query) SearchResponse {
-	var buf bytes.Buffer
-
-	elasticQuery := toolsElasticConfig(query)
-	if err := json.NewEncoder(&buf).Encode(elasticQuery); err != nil {
-		slog.Debug(fmt.Sprintf(
-			"Failed to encode elastic query %s with %s",
-			elasticQuery,
-			err.Error()),
-		)
-	}
-
-	response, err := ElasticClient.Search(
-		ElasticClient.Search.WithIndex("tool"),
-		ElasticClient.Search.WithBody(&buf),
-	)
-
-	if err != nil {
-		slog.Debug(fmt.Sprintf(
-			"Failed to execute elastic query with %s",
-			err.Error()),
-		)
-	}
-	defer response.Body.Close()
-
-	body, err := io.ReadAll(response.Body)
-	if err != nil {
-		slog.Debug(fmt.Sprintf(
-			"Failed to read elastic response with %s",
-			err.Error()),
-		)
-	}
-
-	var elasticResp SearchResponse
-	json.Unmarshal(body, &elasticResp)
+	elasticResp, body := executeSearchWithRetry("tool", func() gin.H {
+		return toolsElasticConfig(query)
+	})
 
 	if elasticResp.Hits.Hits == nil {
-		slog.Warn("Hits from elastic are null, query may be malformed")
-		slog.Debug(fmt.Sprintf("Null result elastic query: %s", elasticQuery))
+		if len(body) > 0 {
+			var elasticError SearchErrorResponse
+			json.Unmarshal(body, &elasticError)
+			rootCauses := elasticError.Error["root_cause"]
+			if len(rootCauses) > 0 && rootCauses[0].Reason != "" {
+				slog.Warn(
+					fmt.Sprintf("Search query returned elastic error: %s",
+						rootCauses[0].Reason,
+					))
+			} else {
+				slog.Warn("Hits from elastic are null, query may be malformed")
+			}
+		} else {
+			slog.Warn("Hits from elastic are null, query may be malformed")
+		}
+		slog.Debug(fmt.Sprintf("Null result elastic query: %s", toolsElasticConfig(query)))
 	}
 
 	stripExplanation(elasticResp, query, "tool")
@@ -724,7 +645,7 @@ func toolsElasticConfig(query Query) gin.H {
 		},
 	}
 
-	agg1 := buildAggregations(query, mustFilters)
+	agg1 := buildAggregations(query, mustFilters, "tool")
 
 	response := gin.H{
 		"size":  os.Getenv("SEARCH_NO_RECORDS"),
@@ -762,7 +683,7 @@ func CollectionSearch(c *gin.Context) {
 		return
 	}
 	results := collectionSearch(query)
-	BQUpload(query, results, "collection")
+	//BQUpload(query, results, "collection")
 	c.JSON(http.StatusOK, results)
 }
 
@@ -775,44 +696,27 @@ func collectionChannel(query Query, res chan SearchResponse) {
 // the provided query as the search term.  Results are returned in the format
 // returned by elastic (SearchResponse).
 func collectionSearch(query Query) SearchResponse {
-	var buf bytes.Buffer
-
-	elasticQuery := collectionsElasticConfig(query)
-	if err := json.NewEncoder(&buf).Encode(elasticQuery); err != nil {
-		slog.Debug(fmt.Sprintf(
-			"Failed to encode elastic query %s with %s",
-			elasticQuery,
-			err.Error()),
-		)
-	}
-
-	response, err := ElasticClient.Search(
-		ElasticClient.Search.WithIndex("collection"),
-		ElasticClient.Search.WithBody(&buf),
-	)
-
-	if err != nil {
-		slog.Debug(fmt.Sprintf(
-			"Failed to execute elastic query with %s",
-			err.Error()),
-		)
-	}
-	defer response.Body.Close()
-
-	body, err := io.ReadAll(response.Body)
-	if err != nil {
-		slog.Debug(fmt.Sprintf(
-			"Failed to read elastic response with %s",
-			err.Error()),
-		)
-	}
-
-	var elasticResp SearchResponse
-	json.Unmarshal(body, &elasticResp)
+	elasticResp, body := executeSearchWithRetry("collection", func() gin.H {
+		return collectionsElasticConfig(query)
+	})
 
 	if elasticResp.Hits.Hits == nil {
-		slog.Warn("Hits from elastic are null, query may be malformed")
-		slog.Debug(fmt.Sprintf("Null result elastic query: %s", elasticQuery))
+		if len(body) > 0 {
+			var elasticError SearchErrorResponse
+			json.Unmarshal(body, &elasticError)
+			rootCauses := elasticError.Error["root_cause"]
+			if len(rootCauses) > 0 && rootCauses[0].Reason != "" {
+				slog.Warn(
+					fmt.Sprintf("Search query returned elastic error: %s",
+						rootCauses[0].Reason,
+					))
+			} else {
+				slog.Warn("Hits from elastic are null, query may be malformed")
+			}
+		} else {
+			slog.Warn("Hits from elastic are null, query may be malformed")
+		}
+		slog.Debug(fmt.Sprintf("Null result elastic query: %s", collectionsElasticConfig(query)))
 	}
 
 	stripExplanation(elasticResp, query, "collection")
@@ -935,7 +839,7 @@ func collectionsElasticConfig(query Query) gin.H {
 		},
 	}
 
-	agg1 := buildAggregations(query, mustFilters)
+	agg1 := buildAggregations(query, mustFilters, "collection")
 
 	response := gin.H{
 		"size":  os.Getenv("SEARCH_NO_RECORDS"),
@@ -978,7 +882,7 @@ func DataUseSearch(c *gin.Context) {
 		return
 	}
 	results := dataUseSearch(query)
-	BQUpload(query, results, "datauseregister")
+	//BQUpload(query, results, "datauseregister")
 	c.JSON(http.StatusOK, results)
 }
 
@@ -991,44 +895,27 @@ func dataUseChannel(query Query, res chan SearchResponse) {
 // the provided query as the search term.  Results are returned in the format
 // returned by elastic (SearchResponse).
 func dataUseSearch(query Query) SearchResponse {
-	var buf bytes.Buffer
-
-	elasticQuery := dataUseElasticConfig(query)
-	if err := json.NewEncoder(&buf).Encode(elasticQuery); err != nil {
-		slog.Debug(fmt.Sprintf(
-			"Failed to encode elastic query %s with %s",
-			elasticQuery,
-			err.Error()),
-		)
-	}
-
-	response, err := ElasticClient.Search(
-		ElasticClient.Search.WithIndex("datauseregister"),
-		ElasticClient.Search.WithBody(&buf),
-	)
-
-	if err != nil {
-		slog.Debug(fmt.Sprintf(
-			"Failed to execute elastic query with %s",
-			err.Error()),
-		)
-	}
-	defer response.Body.Close()
-
-	body, err := io.ReadAll(response.Body)
-	if err != nil {
-		slog.Debug(fmt.Sprintf(
-			"Failed to read elastic response with %s",
-			err.Error()),
-		)
-	}
-
-	var elasticResp SearchResponse
-	json.Unmarshal(body, &elasticResp)
+	elasticResp, body := executeSearchWithRetry("datauseregister", func() gin.H {
+		return dataUseElasticConfig(query)
+	})
 
 	if elasticResp.Hits.Hits == nil {
-		slog.Warn("Hits from elastic are null, query may be malformed")
-		slog.Debug(fmt.Sprintf("Null result elastic query: %s", elasticQuery))
+		if len(body) > 0 {
+			var elasticError SearchErrorResponse
+			json.Unmarshal(body, &elasticError)
+			rootCauses := elasticError.Error["root_cause"]
+			if len(rootCauses) > 0 && rootCauses[0].Reason != "" {
+				slog.Warn(
+					fmt.Sprintf("Search query returned elastic error: %s",
+						rootCauses[0].Reason,
+					))
+			} else {
+				slog.Warn("Hits from elastic are null, query may be malformed")
+			}
+		} else {
+			slog.Warn("Hits from elastic are null, query may be malformed")
+		}
+		slog.Debug(fmt.Sprintf("Null result elastic query: %s", dataUseElasticConfig(query)))
 	}
 
 	stripExplanation(elasticResp, query, "dur")
@@ -1153,7 +1040,7 @@ func dataUseElasticConfig(query Query) gin.H {
 		},
 	}
 
-	agg1 := buildAggregations(query, mustFilters)
+	agg1 := buildAggregations(query, mustFilters, "datauseregister")
 
 	response := gin.H{
 		"size":  os.Getenv("SEARCH_NO_RECORDS"),
@@ -1186,7 +1073,7 @@ func PublicationSearch(c *gin.Context) {
 		return
 	}
 	results := publicationSearch(query)
-	BQUpload(query, results, "publication")
+	//BQUpload(query, results, "publication")
 	c.JSON(http.StatusOK, results)
 }
 
@@ -1201,44 +1088,27 @@ func publicationChannel(query Query, res chan SearchResponse) {
 // The publications index consists of the publications that are hosted on the
 // Gateway - this is not a federated search.
 func publicationSearch(query Query) SearchResponse {
-	var buf bytes.Buffer
-
-	elasticQuery := publicationElasticConfig(query)
-	if err := json.NewEncoder(&buf).Encode(elasticQuery); err != nil {
-		slog.Debug(fmt.Sprintf(
-			"Failed to encode elastic query %s with %s",
-			elasticQuery,
-			err.Error()),
-		)
-	}
-
-	response, err := ElasticClient.Search(
-		ElasticClient.Search.WithIndex("publication"),
-		ElasticClient.Search.WithBody(&buf),
-	)
-
-	if err != nil {
-		slog.Debug(fmt.Sprintf(
-			"Failed to execute elastic query with %s",
-			err.Error()),
-		)
-	}
-	defer response.Body.Close()
-
-	body, err := io.ReadAll(response.Body)
-	if err != nil {
-		slog.Debug(fmt.Sprintf(
-			"Failed to read elastic response with %s",
-			err.Error()),
-		)
-	}
-
-	var elasticResp SearchResponse
-	json.Unmarshal(body, &elasticResp)
+	elasticResp, body := executeSearchWithRetry("publication", func() gin.H {
+		return publicationElasticConfig(query)
+	})
 
 	if elasticResp.Hits.Hits == nil {
-		slog.Warn("Hits from elastic are null, query may be malformed")
-		slog.Debug(fmt.Sprintf("Null result elastic query: %s", elasticQuery))
+		if len(body) > 0 {
+			var elasticError SearchErrorResponse
+			json.Unmarshal(body, &elasticError)
+			rootCauses := elasticError.Error["root_cause"]
+			if len(rootCauses) > 0 && rootCauses[0].Reason != "" {
+				slog.Warn(
+					fmt.Sprintf("Search query returned elastic error: %s",
+						rootCauses[0].Reason,
+					))
+			} else {
+				slog.Warn("Hits from elastic are null, query may be malformed")
+			}
+		} else {
+			slog.Warn("Hits from elastic are null, query may be malformed")
+		}
+		slog.Debug(fmt.Sprintf("Null result elastic query: %s", publicationElasticConfig(query)))
 	}
 
 	stripExplanation(elasticResp, query, "publication")
@@ -1373,7 +1243,7 @@ func publicationElasticConfig(query Query) gin.H {
 		},
 	}
 
-	agg1 := buildAggregations(query, mustFilters)
+	agg1 := buildAggregations(query, mustFilters, "publication")
 
 	response := gin.H{
 		"size":  os.Getenv("SEARCH_NO_RECORDS"),
@@ -1412,7 +1282,7 @@ func DataProviderSearch(c *gin.Context) {
 	}
 
 	results := dataProviderSearch(query)
-	BQUpload(query, results, "dataprovider")
+	//BQUpload(query, results, "dataprovider")
 	c.JSON(http.StatusOK, results)
 }
 
@@ -1425,44 +1295,27 @@ func dataProviderChannel(query Query, res chan SearchResponse) {
 // the provided query as the search term.  Results are returned in the format
 // returned by elastic (SearchResponse).
 func dataProviderSearch(query Query) SearchResponse {
-	var buf bytes.Buffer
-
-	elasticQuery := dataProviderElasticConfig(query)
-	if err := json.NewEncoder(&buf).Encode(elasticQuery); err != nil {
-		slog.Debug(fmt.Sprintf(
-			"Failed to encode elastic query %s with %s",
-			elasticQuery,
-			err.Error()),
-		)
-	}
-
-	response, err := ElasticClient.Search(
-		ElasticClient.Search.WithIndex("dataprovider"),
-		ElasticClient.Search.WithBody(&buf),
-	)
-
-	if err != nil {
-		slog.Debug(fmt.Sprintf(
-			"Failed to execute elastic query with %s",
-			err.Error()),
-		)
-	}
-	defer response.Body.Close()
-
-	body, err := io.ReadAll(response.Body)
-	if err != nil {
-		slog.Debug(fmt.Sprintf(
-			"Failed to read elastic response with %s",
-			err.Error()),
-		)
-	}
-
-	var elasticResp SearchResponse
-	json.Unmarshal(body, &elasticResp)
+	elasticResp, body := executeSearchWithRetry("dataprovider", func() gin.H {
+		return dataProviderElasticConfig(query)
+	})
 
 	if elasticResp.Hits.Hits == nil {
-		slog.Warn("Hits from elastic are null, query may be malformed")
-		slog.Debug(fmt.Sprintf("Null result elastic query: %s", elasticQuery))
+		if len(body) > 0 {
+			var elasticError SearchErrorResponse
+			json.Unmarshal(body, &elasticError)
+			rootCauses := elasticError.Error["root_cause"]
+			if len(rootCauses) > 0 && rootCauses[0].Reason != "" {
+				slog.Warn(
+					fmt.Sprintf("Search query returned elastic error: %s",
+						rootCauses[0].Reason,
+					))
+			} else {
+				slog.Warn("Hits from elastic are null, query may be malformed")
+			}
+		} else {
+			slog.Warn("Hits from elastic are null, query may be malformed")
+		}
+		slog.Debug(fmt.Sprintf("Null result elastic query: %s", dataProviderElasticConfig(query)))
 	}
 
 	stripExplanation(elasticResp, query, "dataProvider")
@@ -1586,7 +1439,7 @@ func dataProviderElasticConfig(query Query) gin.H {
 		},
 	}
 
-	agg1 := buildAggregations(query, mustFilters)
+	agg1 := buildAggregations(query, mustFilters, "dataprovider")
 
 	response := gin.H{
 		"size":        os.Getenv("SEARCH_NO_RECORDS"),
@@ -1613,7 +1466,7 @@ func DataCustodianNetworkSearch(c *gin.Context) {
 		return
 	}
 	results := dataCustodianNetworkSearch(query)
-	BQUpload(query, results, "datacustodiannetwork")
+	//BQUpload(query, results, "datacustodiannetwork")
 	c.JSON(http.StatusOK, results)
 }
 
@@ -1626,44 +1479,27 @@ func dataCustodianNetworkChannel(query Query, res chan SearchResponse) {
 // the provided query as the search term.  Results are returned in the format
 // returned by elastic (SearchResponse).
 func dataCustodianNetworkSearch(query Query) SearchResponse {
-	var buf bytes.Buffer
-
-	elasticQuery := dataCustodianNetworkElasticConfig(query)
-	if err := json.NewEncoder(&buf).Encode(elasticQuery); err != nil {
-		slog.Debug(fmt.Sprintf(
-			"Failed to encode elastic query %s with %s",
-			elasticQuery,
-			err.Error()),
-		)
-	}
-
-	response, err := ElasticClient.Search(
-		ElasticClient.Search.WithIndex("datacustodiannetwork"),
-		ElasticClient.Search.WithBody(&buf),
-	)
-
-	if err != nil {
-		slog.Debug(fmt.Sprintf(
-			"Failed to execute elastic query with %s",
-			err.Error()),
-		)
-	}
-	defer response.Body.Close()
-
-	body, err := io.ReadAll(response.Body)
-	if err != nil {
-		slog.Debug(fmt.Sprintf(
-			"Failed to read elastic response with %s",
-			err.Error()),
-		)
-	}
-
-	var elasticResp SearchResponse
-	json.Unmarshal(body, &elasticResp)
+	elasticResp, body := executeSearchWithRetry("datacustodiannetwork", func() gin.H {
+		return dataCustodianNetworkElasticConfig(query)
+	})
 
 	if elasticResp.Hits.Hits == nil {
-		slog.Warn("Hits from elastic are null, query may be malformed")
-		slog.Debug(fmt.Sprintf("Null result elastic query: %s", elasticQuery))
+		if len(body) > 0 {
+			var elasticError SearchErrorResponse
+			json.Unmarshal(body, &elasticError)
+			rootCauses := elasticError.Error["root_cause"]
+			if len(rootCauses) > 0 && rootCauses[0].Reason != "" {
+				slog.Warn(
+					fmt.Sprintf("Search query returned elastic error: %s",
+						rootCauses[0].Reason,
+					))
+			} else {
+				slog.Warn("Hits from elastic are null, query may be malformed")
+			}
+		} else {
+			slog.Warn("Hits from elastic are null, query may be malformed")
+		}
+		slog.Debug(fmt.Sprintf("Null result elastic query: %s", dataCustodianNetworkElasticConfig(query)))
 	}
 
 	stripExplanation(elasticResp, query, "datacustodiannetwork")
@@ -1748,7 +1584,7 @@ func dataCustodianNetworkElasticConfig(query Query) gin.H {
 		},
 	}
 
-	agg1 := buildAggregations(query, mustFilters)
+	agg1 := buildAggregations(query, mustFilters, "datacustodiannetwork")
 
 	return gin.H{
 		"size":  os.Getenv("SEARCH_NO_RECORDS"),
@@ -1776,9 +1612,19 @@ func dataCustodianNetworkElasticConfig(query Query) gin.H {
 // buildAggregations constructs the "aggs" part of an elastic search query
 // from provided Aggregations.
 // Aggregations are expected to be an array of `{'type': string, 'keys': string}`
-func buildAggregations(query Query, mustFilters []gin.H) gin.H {
+func buildAggregations(query Query, mustFilters []gin.H, entityType string) gin.H {
 	agg1 := gin.H{}
+	entityTypeNormalized := strings.ToLower(entityType)
 	for _, agg := range query.Aggregations {
+		aggType, hasType := agg["type"].(string)
+		if hasType {
+			if strings.TrimSpace(aggType) == "" {
+				hasType = false
+			}
+		}
+		if hasType && strings.ToLower(aggType) != entityTypeNormalized {
+			continue
+		}
 		k, ok := agg["keys"].(string)
 		if !ok {
 			log.Printf("Filter key in %s not recognised", agg)
@@ -1797,7 +1643,12 @@ func buildAggregations(query Query, mustFilters []gin.H) gin.H {
 				"range": gin.H{"field": k, "ranges": ranges},
 			}
 		} else {
-			aggInner[k] = gin.H{"terms": gin.H{"field": k, "size": os.Getenv("SEARCH_NO_RECORDS_AGGREGATION")}}
+			aggInner[k] = gin.H{
+				"terms": gin.H{
+					"field": resolveAggregationField(k),
+					"size":  os.Getenv("SEARCH_NO_RECORDS_AGGREGATION"),
+				},
+			}
 		}
 
 		for _, fil := range mustFilters {
@@ -1806,7 +1657,7 @@ func buildAggregations(query Query, mustFilters []gin.H) gin.H {
 				slog.Info("Could not marshal filter")
 			}
 			filStr := string(filJson)
-			if (strings.Contains(filStr, k)) {
+			if strings.Contains(filStr, k) {
 				continue
 			} else {
 				filters = append(filters, fil)
@@ -1814,7 +1665,7 @@ func buildAggregations(query Query, mustFilters []gin.H) gin.H {
 		}
 
 		agg1[k] = gin.H{
-			"aggs": aggInner, 
+			"aggs":   aggInner,
 			"filter": gin.H{"bool": gin.H{"must": filters}},
 		}
 	}
@@ -1834,12 +1685,27 @@ func flattenAggs(elasticResp SearchResponse) map[string]any {
 	newAggs := make(map[string]any)
 
 	for k, agg := range elasticResp.Aggregations {
-		if k == "dateRange" || k == "publicationDate" {
-			newAggs["startDate"] = agg.(map[string]any)["startDate"]
-			newAggs["endDate"] = agg.(map[string]any)["endDate"]
-		} else {
-			newAggs[k] = agg.(map[string]any)[k]
+		aggMap, ok := agg.(map[string]any)
+		if !ok {
+			continue
 		}
+
+		if k == "dateRange" || k == "publicationDate" {
+			if start, ok := aggMap["startDate"]; ok {
+				newAggs["startDate"] = start
+			}
+			if end, ok := aggMap["endDate"]; ok {
+				newAggs["endDate"] = end
+			}
+			continue
+		}
+
+		if nested, ok := aggMap[k]; ok {
+			newAggs[k] = nested
+			continue
+		}
+
+		newAggs[k] = aggMap
 	}
 
 	return newAggs
@@ -1848,11 +1714,15 @@ func flattenAggs(elasticResp SearchResponse) map[string]any {
 // Remove the explanations from a SearchResponse to reduce its size
 // And send explanation to search explanation extractor
 func stripExplanation(elasticResp SearchResponse, query Query, entityType string) {
-	_, expEnabled := os.LookupEnv("SEARCH_EXPLANATION_EXTRACTOR")
+	extractorURL, expEnabled := os.LookupEnv("SEARCH_EXPLANATION_EXTRACTOR")
+	if expEnabled {
+		extractorURL = strings.TrimSpace(extractorURL)
+		expEnabled = extractorURL != ""
+	}
 	// Send explanation if enabled, entity is dataset and query is not empty
 	if expEnabled && entityType == "dataset" && !reflect.ValueOf(query).IsZero() {
 		respCopy := copyResponseHits(elasticResp)
-		go extractExplanation(respCopy, query)
+		go extractExplanation(respCopy, query, extractorURL)
 	}
 
 	for i := range elasticResp.Hits.Hits {
@@ -1871,7 +1741,7 @@ func copyResponseHits(r SearchResponse) SearchResponse {
 	}
 }
 
-func extractExplanation(elasticResp SearchResponse, query Query) {
+func extractExplanation(elasticResp SearchResponse, query Query, extractorURL string) {
 	bodyContent := gin.H{
 		"data":              elasticResp,
 		"query":             fmt.Sprintf("%s", query),
@@ -1882,10 +1752,12 @@ func extractExplanation(elasticResp SearchResponse, query Query) {
 		slog.Info(fmt.Sprintf("Failed to marshal search explanation payload: %s", err.Error()))
 	}
 
-	urlPath := fmt.Sprintf("%s/process_data", os.Getenv("SEARCH_EXPLANATION_EXTRACTOR"))
+	baseURL := strings.TrimRight(extractorURL, "/")
+	urlPath := fmt.Sprintf("%s/process_data", baseURL)
 	req, err := http.NewRequest("POST", urlPath, bytes.NewBuffer(body))
 	if err != nil {
 		slog.Info(fmt.Sprintf("Failed to build search explanation payload with: %s", err.Error()))
+		return
 	}
 	req.Header.Add("Content-Type", "application/json")
 	req.SetBasicAuth(os.Getenv("SEARCH_EXPLANATION_USER"), os.Getenv("SEARCH_EXPLANATION_PASSWORD"))
@@ -1893,6 +1765,7 @@ func extractExplanation(elasticResp SearchResponse, query Query) {
 	response, err := Client.Do(req)
 	if err != nil {
 		slog.Info(fmt.Sprintf("Failed to execute query with: %s", err.Error()))
+		return
 	}
 	defer response.Body.Close()
 
@@ -1974,11 +1847,65 @@ func similarSearch(id string, index string) SearchResponse {
 	return elasticResp
 }
 
+// EnsureTableExists ensures that the BigQuery table for search analytics exists.
+// If the table already exists, it returns nil. If there's an error creating the table,
+// it returns that error.
+func EnsureTableExists() error {
+	ctx := context.Background()
+	analyticsDataset := BigQueryClient.Dataset(os.Getenv("BQ_DATASET_NAME"))
+	table := analyticsDataset.Table(os.Getenv("BQ_TABLE_NAME"))
+
+	schema := bigquery.Schema{
+		{Name: "UUID", Required: true, Type: bigquery.StringFieldType},
+		{Name: "Timestamp", Required: false, Type: bigquery.DateTimeFieldType},
+		{Name: "EntityType", Required: true, Type: bigquery.StringFieldType},
+		{Name: "SearchTerm", Required: false, Type: bigquery.StringFieldType},
+		{Name: "FilterUsed", Repeated: false, Type: bigquery.JSONFieldType},
+		{Name: "PageResults", Required: false, Type: bigquery.JSONFieldType},
+		{Name: "EntitiesReturned", Required: true, Type: bigquery.IntegerFieldType},
+	}
+
+	if err := table.Create(ctx, &bigquery.TableMetadata{Schema: schema}); err != nil {
+		var e *googleapi.Error
+		if errors.As(err, &e) {
+			if e.Code == 409 {
+				// Table already exists, which is fine
+				return nil
+			}
+			return fmt.Errorf("failed to create BigQuery table: %w", err)
+		}
+		return fmt.Errorf("failed to create BigQuery table: %w", err)
+	}
+
+	return nil
+}
+
 func uploadSearchAnalytics(query Query, results SearchResponse, entityType string) {
 
 	ctx := context.Background()
 	analyticsDataset := BigQueryClient.Dataset(os.Getenv("BQ_DATASET_NAME"))
 	table := analyticsDataset.Table(os.Getenv("BQ_TABLE_NAME"))
+
+	schema := bigquery.Schema{
+		{Name: "UUID", Required: true, Type: bigquery.StringFieldType},
+		{Name: "Timestamp", Required: false, Type: bigquery.DateTimeFieldType},
+		{Name: "EntityType", Required: true, Type: bigquery.StringFieldType},
+		{Name: "SearchTerm", Required: false, Type: bigquery.StringFieldType},
+		{Name: "FilterUsed", Repeated: false, Type: bigquery.JSONFieldType},
+		{Name: "PageResults", Required: false, Type: bigquery.JSONFieldType},
+		{Name: "EntitiesReturned", Required: true, Type: bigquery.IntegerFieldType},
+	}
+
+	if err := table.Create(ctx, &bigquery.TableMetadata{Schema: schema}); err != nil {
+		var e *googleapi.Error
+		if errors.As(err, &e) {
+			if e.Code == 409 {
+				slog.Debug(fmt.Sprintf("%s", err.Error()))
+			}
+		} else {
+			slog.Info(fmt.Sprintf("Could not create table: %s", err.Error()))
+		}
+	}
 
 	u := table.Inserter()
 
