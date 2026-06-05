@@ -11,3 +11,10 @@ jobs:
     with:
       chart_path: chart/search-service/Chart.yaml
     secrets: inherit
+
+  release:
+    uses: HDRUK/github-actions-templates/.github/workflows/docker-build.yaml@main
+    with:
+      environment: prod
+      chart_path: chart/search-service/Chart.yaml
+    secrets: inherit
