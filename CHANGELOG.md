@@ -1,3 +1,12 @@
+## [1.8.1](https://github.com/HDRUK/search-service/compare/v1.8.0...v1.8.1) (2026-07-24)
+
+### 🐛 Bug Fixes
+
+* **GAT-8812:** updated semantic pipeline (#192) ([f1372f2](https://github.com/HDRUK/search-service/commit/f1372f2a590e209311d18e6e118563b584ab514d)), closes [GAT-8812](undefinedGAT-8812)
+* **GAT-8812:** updated the env variable (#191) ([375e0c8](https://github.com/HDRUK/search-service/commit/375e0c8f64fb2909c46a7445e6f8417795a6001f)), closes [GAT-8812](undefinedGAT-8812)
+* **GAT-8812:** updated workflow pipelines to use reusable pipelines (#190) ([15829b9](https://github.com/HDRUK/search-service/commit/15829b9d95414004cc36736b1171a579b8525d87)), closes [GAT-8812](undefinedGAT-8812)
+* **GAT-9057:** added pipeline for automated Jira release to the registry apps (#194) ([ee7b613](https://github.com/HDRUK/search-service/commit/ee7b613dc6653010e19fa35f4ddb014920655ed6)), closes [GAT-9057](undefinedGAT-9057)
+
 ## [1.8.0](https://github.com/HDRUK/search-service/compare/v1.7.0...v1.8.0) (2026-05-08)
 
 ### ✨ Features
