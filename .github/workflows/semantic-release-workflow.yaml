@@ -14,6 +14,7 @@ jobs:
 
   release:
     uses: HDRUK/github-actions-templates/.github/workflows/docker-build.yaml@main
+    needs: semantic
     with:
       environment: prod
       chart_path: chart/search-service/Chart.yaml
