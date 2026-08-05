@@ -354,6 +354,96 @@ func TestDatasetElasticConfig(t *testing.T) {
 	assert.NotContains(t, string(publisherInnerFilter), "publisherName")
 }
 
+func TestDatasetElasticConfig_PartnerContextScopesToExactPartner(t *testing.T) {
+	partner := "CRUK"
+	TestQuery := Query{
+		QueryString:    "search term test",
+		PartnerContext: &partner,
+	}
+
+	datasetConfig := datasetElasticConfig(TestQuery)
+
+	queryClause := datasetConfig["query"].(gin.H)
+	assert.Contains(t, queryClause, "bool")
+	boolClause := queryClause["bool"].(gin.H)
+	assert.Contains(t, boolClause, "must")
+	assert.Contains(t, boolClause, "filter")
+
+	filterJson, _ := json.Marshal(boolClause["filter"])
+	assert.Contains(t, string(filterJson), "\"term\":{\"partnerContext\":\"CRUK\"}")
+
+	mustJson, _ := json.Marshal(boolClause["must"])
+	assert.Contains(t, string(mustJson), "search term test")
+
+	assert.Contains(t, datasetConfig, "post_filter")
+}
+
+func TestDatasetElasticConfig_HDRUKPartnerContextIncludesUnlabelledDatasets(t *testing.T) {
+	partner := "HDRUK"
+	TestQuery := Query{
+		QueryString:    "search term test",
+		PartnerContext: &partner,
+	}
+
+	datasetConfig := datasetElasticConfig(TestQuery)
+
+	queryClause := datasetConfig["query"].(gin.H)
+	boolClause := queryClause["bool"].(gin.H)
+	filterJson, _ := json.Marshal(boolClause["filter"])
+	filterStr := string(filterJson)
+
+	// HDRUK scope must match documents labelled HDRUK...
+	assert.Contains(t, filterStr, "\"term\":{\"partnerContext\":\"HDRUK\"}")
+	// ...OR documents with no partnerContext label at all (legacy/unlabelled data)
+	assert.Contains(t, filterStr, "\"must_not\"")
+	assert.Contains(t, filterStr, "\"exists\":{\"field\":\"partnerContext\"}")
+	assert.Contains(t, filterStr, "\"minimum_should_match\":1")
+
+	// it must NOT be a plain exact-match term filter like the non-HDRUK case
+	assert.NotEqual(t, "[{\"term\":{\"partnerContext\":\"HDRUK\"}}]", filterStr)
+}
+
+func TestDatasetElasticConfig_NoPartnerContextIsANoOp(t *testing.T) {
+	withoutScope := datasetElasticConfig(Query{QueryString: "search term test"})
+	withNilScope := datasetElasticConfig(Query{QueryString: "search term test", PartnerContext: nil})
+
+	withoutScopeJson, _ := json.Marshal(withoutScope["query"])
+	withNilScopeJson, _ := json.Marshal(withNilScope["query"])
+
+	// no PartnerContext must produce the same query shape as
+	// explicitly nil, and neither must reference partnerContext anywhere
+	assert.Equal(t, string(withoutScopeJson), string(withNilScopeJson))
+	assert.NotContains(t, string(withoutScopeJson), "partnerContext")
+
+	queryClause := withoutScope["query"].(gin.H)
+	boolClause := queryClause["bool"].(gin.H)
+	assert.Contains(t, boolClause, "should")
+	assert.NotContains(t, boolClause, "filter")
+}
+
+func TestDatasetElasticConfig_PartnerContextWithMatchAllQuery(t *testing.T) {
+	partner := "CRUK"
+	TestQuery := Query{
+		QueryString:    "",
+		PartnerContext: &partner,
+	}
+
+	datasetConfig := datasetElasticConfig(TestQuery)
+
+	queryClause := datasetConfig["query"].(gin.H)
+	assert.Contains(t, queryClause, "bool")
+	boolClause := queryClause["bool"].(gin.H)
+	assert.Contains(t, boolClause, "must")
+	assert.Contains(t, boolClause, "filter")
+
+	mustJson, _ := json.Marshal(boolClause["must"])
+	assert.Contains(t, string(mustJson), "function_score")
+	assert.Contains(t, string(mustJson), "match_all")
+
+	filterJson, _ := json.Marshal(boolClause["filter"])
+	assert.Contains(t, string(filterJson), "\"term\":{\"partnerContext\":\"CRUK\"}")
+}
+
 func TestCollectionElasticConfig(t *testing.T) {
 	TestQuery := Query{
 		QueryString: "search term test",

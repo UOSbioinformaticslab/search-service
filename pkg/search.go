@@ -81,10 +81,11 @@ where:
 - value1 is a value matching values in the specified fields of the elastic index e.g. "publisher A"
 */
 type Query struct {
-	QueryString  string                            `json:"query"`
-	Filters      map[string]map[string]interface{} `json:"filters"`
-	Aggregations []map[string]interface{}          `json:"aggs"`
-	IDs          []string                          `json:"ids"`
+	QueryString    string                            `json:"query"`
+	Filters        map[string]map[string]interface{} `json:"filters"`
+	Aggregations   []map[string]interface{}          `json:"aggs"`
+	IDs            []string                          `json:"ids"`
+	PartnerContext *string                           `json:"partnerContext"`
 }
 
 type SimilarSearch struct {
@@ -487,9 +488,33 @@ func datasetElasticConfig(query Query) gin.H {
 		mustFiltersByKey[key] = filter
 	}
 
+	finalQuery := mainQuery
+	if query.PartnerContext != nil {
+		var partnerFilter gin.H
+		if *query.PartnerContext == "HDRUK" {
+			partnerFilter = gin.H{
+				"bool": gin.H{
+					"should": []gin.H{
+						{"term": gin.H{"partnerContext": "HDRUK"}},
+						{"bool": gin.H{"must_not": []gin.H{{"exists": gin.H{"field": "partnerContext"}}}}},
+					},
+					"minimum_should_match": 1,
+				},
+			}
+		} else {
+			partnerFilter = gin.H{"term": gin.H{"partnerContext": *query.PartnerContext}}
+		}
+		finalQuery = gin.H{
+			"bool": gin.H{
+				"must":   []gin.H{mainQuery},
+				"filter": []gin.H{partnerFilter},
+			},
+		}
+	}
+
 	response := gin.H{
 		"size":    searchNoRecords,
-		"query":   mainQuery,
+		"query":   finalQuery,
 		"explain": explanationEnabled,
 		"highlight": gin.H{
 			"fields": gin.H{
@@ -1376,7 +1401,7 @@ func copyResponseHits(r SearchResponse) SearchResponse {
 func extractExplanation(elasticResp SearchResponse, query Query, searchUuid string) {
 	bodyContent := gin.H{
 		"data":              elasticResp,
-		"query":             fmt.Sprintf("%s", query),
+		"query":             fmt.Sprintf("%v", query),
 		"destination_table": os.Getenv("SEARCH_EXPLANATION_TABLE"),
 		"search_uuid":       searchUuid,
 	}

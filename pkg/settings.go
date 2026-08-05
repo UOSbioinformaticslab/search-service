@@ -114,6 +114,7 @@ func DefineDatasetMappings(c *gin.Context) {
 					},
 				},
 				"publisherName":      gin.H{"type": "keyword"},
+				"partnerContext":     gin.H{"type": "keyword"},
 				"dataProvider":       gin.H{"type": "keyword"},
 				"dataProviderColl":   gin.H{"type": "keyword"},
 				"dataUseTitles":      gin.H{"type": "keyword"},
